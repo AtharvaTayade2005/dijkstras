@@ -122,6 +122,37 @@ class TestDijkstraGUI(unittest.TestCase):
         self.app.update_idletasks()
         self.assertEqual(self.app.current_source, "D")
 
+    def test_working_panel_stepper_controls(self):
+        """Verify that stepper playback controls advance frames and update canvas tags."""
+        self.app.set_source("A")
+        self.app.update_idletasks()
+
+        panel = self.app.working_panel
+        total_frames = len(self.app.current_result.frames)
+        self.assertGreater(total_frames, 10)
+
+        # Initial frame
+        self.assertEqual(panel.current_frame_idx, 0)
+        self.assertEqual(self.app.canvas_view.current_distances["A"], 0.0)
+
+        # Step forward
+        panel.next_frame()
+        self.app.update_idletasks()
+        self.assertEqual(panel.current_frame_idx, 1)
+
+        # Step back
+        panel.prev_frame()
+        self.app.update_idletasks()
+        self.assertEqual(panel.current_frame_idx, 0)
+
+        # Jump to end
+        panel.jump_to_end()
+        self.app.update_idletasks()
+        self.assertEqual(panel.current_frame_idx, total_frames - 1)
+        self.assertEqual(self.app.canvas_view.current_distances["A"], 0.0)
+        self.assertEqual(self.app.canvas_view.current_distances["C"], 2.0)
+        self.assertEqual(self.app.canvas_view.current_distances["D"], 3.0)
+
 
 if __name__ == "__main__":
     unittest.main()

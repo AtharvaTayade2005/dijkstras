@@ -171,6 +171,34 @@ class TestDijkstraExplorer(unittest.TestCase):
         self.assertEqual(result.routing_table["G"].next_hop, "-")
         self.assertEqual(result.routing_table["G"].path_str, "Unreachable")
 
+    def test_simulation_frames(self):
+        """Verify that simulation frames correctly capture every calculation step and formula."""
+        for src in self.graph.nodes:
+            result = run_dijkstra(self.graph, src)
+            self.assertGreater(len(result.frames), 10)
+
+            # Frame 0 is initialization
+            f0 = result.frames[0]
+            self.assertEqual(f0.phase, "INIT")
+            self.assertEqual(f0.current_node, src)
+            self.assertEqual(f0.distances_snapshot[src], 0.0)
+
+            # Check that every EXAMINE_EDGE frame has valid math calculations
+            for frame in result.frames:
+                if frame.phase == "EXAMINE_EDGE":
+                    self.assertIsNotNone(frame.examining_neighbor)
+                    self.assertIsNotNone(frame.edge_weight)
+                    self.assertIsNotNone(frame.candidate_dist)
+                    expected_cand = frame.selected_cost + frame.edge_weight
+                    self.assertEqual(frame.candidate_dist, expected_cand)
+                    self.assertIn(frame.status, ["UPDATED", "UNCHANGED", "SKIPPED"])
+                    self.assertTrue(len(frame.math_formula) > 0)
+
+            # Last frame is complete
+            f_last = result.frames[-1]
+            self.assertEqual(f_last.phase, "COMPLETE")
+            self.assertEqual(len(f_last.permanent_nodes), len(self.graph.nodes))
+
 
 if __name__ == "__main__":
     unittest.main()

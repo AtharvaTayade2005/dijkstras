@@ -3,13 +3,14 @@ gui_canvas.py
 -------------
 Interactive Network Graph Canvas for Dijkstra Network Explorer.
 Renders nodes, weighted edges, badges, hover feedback, responsive resizing,
-and active shortest-path highlighting.
+active shortest-path highlighting, and real-time step-by-step distance calculation tags.
 """
 
 import math
 import tkinter as tk
 from typing import Dict, List, Tuple, Optional, Callable
 from graph import NetworkGraph
+from dijkstra import SimulationFrame, format_distance
 
 
 class NetworkCanvas(tk.Frame):
@@ -30,6 +31,15 @@ class NetworkCanvas(tk.Frame):
         self.highlighted_path: List[str] = []
         self.hovered_node: Optional[str] = None
 
+        # Live calculation simulation states
+        self.current_distances: Dict[str, float] = {n: float("inf") for n in self.graph.nodes}
+        self.current_distances["A"] = 0.0
+        self.permanent_nodes: List[str] = []
+        self.active_visiting_node: Optional[str] = None
+        self.active_neighbor_node: Optional[str] = None
+        self.active_edge: Optional[Tuple[str, str]] = None
+        self.active_edge_status: str = ""
+
         # Cached pixel positions of nodes
         self.node_coords: Dict[str, Tuple[float, float]] = {}
         self.node_radius: float = 24.0
@@ -39,7 +49,8 @@ class NetworkCanvas(tk.Frame):
         self.COLOR_PANEL_BORDER = "#E2E8F0"
         self.COLOR_EDGE = "#94A3B8"
         self.COLOR_EDGE_ACTIVE = "#2563EB"
-        self.COLOR_EDGE_HOVER = "#64748B"
+        self.COLOR_EDGE_CALC_EXAMINE = "#D97706"
+        self.COLOR_EDGE_CALC_UPDATE = "#059669"
         
         self.COLOR_NODE_DEFAULT_BG = "#FFFFFF"
         self.COLOR_NODE_DEFAULT_BORDER = "#334155"
@@ -50,17 +61,21 @@ class NetworkCanvas(tk.Frame):
         self.COLOR_NODE_SOURCE_RING = "#BFDBFE"
         self.COLOR_NODE_SOURCE_TEXT = "#FFFFFF"
 
-        self.COLOR_NODE_PATH_BG = "#10B981"
-        self.COLOR_NODE_PATH_BORDER = "#059669"
-        self.COLOR_NODE_PATH_RING = "#A7F3D0"
-        self.COLOR_NODE_PATH_TEXT = "#FFFFFF"
+        self.COLOR_NODE_FINAL_BG = "#10B981"
+        self.COLOR_NODE_FINAL_BORDER = "#059669"
+        self.COLOR_NODE_FINAL_RING = "#A7F3D0"
+        self.COLOR_NODE_FINAL_TEXT = "#FFFFFF"
+
+        self.COLOR_NODE_EXAMINE_BG = "#F59E0B"
+        self.COLOR_NODE_EXAMINE_BORDER = "#D97706"
+        self.COLOR_NODE_EXAMINE_RING = "#FDE68A"
+        self.COLOR_NODE_EXAMINE_TEXT = "#FFFFFF"
 
         self.COLOR_BADGE_BG = "#FFFFFF"
         self.COLOR_BADGE_BORDER = "#CBD5E1"
         self.COLOR_BADGE_TEXT = "#1E293B"
 
         # Edge label placement parameters: (u, v) -> (t_along_edge, normal_offset_pixels)
-        # t in [0.0, 1.0]: 0.5 is midpoint. Offset is perpendicular in pixels.
         self.edge_label_offsets: Dict[Tuple[str, str], Tuple[float, float]] = {
             ("A", "B"): (0.50, -14.0),
             ("A", "C"): (0.45, -13.0),
@@ -92,9 +107,37 @@ class NetworkCanvas(tk.Frame):
         self.canvas.bind("<Leave>", self._on_leave)
 
     def set_source(self, source: str) -> None:
-        """Update selected source and redraw."""
+        """Update selected source and reset temporary simulation highlights."""
         self.selected_source = source
         self.highlighted_path = []
+        self.active_visiting_node = None
+        self.active_neighbor_node = None
+        self.active_edge = None
+        self.active_edge_status = ""
+        self.current_distances = {n: float("inf") for n in self.graph.nodes}
+        self.current_distances[source] = 0.0
+        self.permanent_nodes = []
+        self.redraw()
+
+    def set_simulation_frame(self, frame: SimulationFrame) -> None:
+        """Apply visual state from an atomic calculation frame."""
+        self.current_distances = frame.distances_snapshot.copy()
+        self.permanent_nodes = frame.permanent_nodes.copy()
+        self.active_visiting_node = frame.current_node
+        self.active_neighbor_node = frame.examining_neighbor
+        self.active_edge = frame.active_edge
+        self.active_edge_status = frame.status
+        self.highlighted_path = frame.highlight_path.copy()
+        self.redraw()
+
+    def set_final_state(self, distances: Dict[str, float]) -> None:
+        """Apply the final algorithm state with all nodes locked."""
+        self.current_distances = distances.copy()
+        self.permanent_nodes = list(self.graph.nodes)
+        self.active_visiting_node = None
+        self.active_neighbor_node = None
+        self.active_edge = None
+        self.active_edge_status = ""
         self.redraw()
 
     def set_highlighted_path(self, path: List[str]) -> None:
@@ -108,19 +151,18 @@ class NetworkCanvas(tk.Frame):
 
     def _calculate_pixel_positions(self) -> None:
         """Convert normalized graph positions to current pixel bounds."""
-        w = max(self.canvas.winfo_width(), 400)
-        h = max(self.canvas.winfo_height(), 320)
+        w = max(self.canvas.winfo_width(), 420)
+        h = max(self.canvas.winfo_height(), 340)
 
-        # Dynamic margins to ensure nodes and badges fit comfortably
-        margin_x = 55
-        margin_y = 50
+        # Dynamic margins to ensure distance tags and badges fit comfortably
+        margin_x = 60
+        margin_y = 65
 
         usable_w = w - (2 * margin_x)
         usable_h = h - (2 * margin_y)
 
-        # Adapt node radius smoothly to canvas dimensions
         base_size = min(w, h)
-        self.node_radius = max(20.0, min(26.0, base_size * 0.045))
+        self.node_radius = max(21.0, min(26.0, base_size * 0.045))
 
         self.node_coords.clear()
         for node, (nx, ny) in self.graph.node_positions.items():
@@ -129,7 +171,7 @@ class NetworkCanvas(tk.Frame):
             self.node_coords[node] = (px, py)
 
     def redraw(self) -> None:
-        """Completely redraw graph elements: edges, badges, nodes, and legend."""
+        """Completely redraw graph elements: edges, badges, nodes, calculation tags, and legend."""
         self.canvas.delete("all")
         self._calculate_pixel_positions()
 
@@ -142,26 +184,30 @@ class NetworkCanvas(tk.Frame):
         # 2. Draw Edge Weight Badges
         self._draw_edge_badges()
 
-        # 3. Draw Nodes
+        # 3. Draw Nodes and their Live Calculation Distance Tags
         self._draw_nodes()
 
         # 4. Draw Legend
         self._draw_legend()
 
     def _draw_edges(self) -> None:
-        """Draw connections between nodes."""
-        # Set of edges currently on the highlighted shortest path
+        """Draw connections between nodes, highlighting active calculation edges and shortest paths."""
         path_edges = set()
         if len(self.highlighted_path) >= 2:
             for i in range(len(self.highlighted_path) - 1):
                 u, v = self.highlighted_path[i], self.highlighted_path[i + 1]
                 path_edges.add((min(u, v), max(u, v)))
 
-        # Draw regular edges first
+        active_exam_edge = None
+        if self.active_edge:
+            u, v = self.active_edge
+            active_exam_edge = (min(u, v), max(u, v))
+
+        # 1. Draw regular edges
         for u, v, _ in self.graph.get_all_edges():
             edge_key = (min(u, v), max(u, v))
-            if edge_key in path_edges:
-                continue  # Draw active path edges on top
+            if edge_key in path_edges or edge_key == active_exam_edge:
+                continue
 
             x1, y1 = self.node_coords[u]
             x2, y2 = self.node_coords[v]
@@ -175,14 +221,13 @@ class NetworkCanvas(tk.Frame):
                 tags="edge"
             )
 
-        # Draw active shortest path edges prominently
+        # 2. Draw active shortest path edges
         for u, v, _ in self.graph.get_all_edges():
             edge_key = (min(u, v), max(u, v))
-            if edge_key in path_edges:
+            if edge_key in path_edges and edge_key != active_exam_edge:
                 x1, y1 = self.node_coords[u]
                 x2, y2 = self.node_coords[v]
 
-                # Outer glow for path edge
                 self.canvas.create_line(
                     x1, y1, x2, y2,
                     fill="#93C5FD",
@@ -190,7 +235,6 @@ class NetworkCanvas(tk.Frame):
                     capstyle=tk.ROUND,
                     tags="active_path_edge_glow"
                 )
-                # Core active path edge
                 self.canvas.create_line(
                     x1, y1, x2, y2,
                     fill=self.COLOR_EDGE_ACTIVE,
@@ -198,6 +242,34 @@ class NetworkCanvas(tk.Frame):
                     capstyle=tk.ROUND,
                     tags="active_path_edge"
                 )
+
+        # 3. Draw currently evaluated calculation edge with arrow indicator
+        if self.active_edge:
+            u, v = self.active_edge
+            x1, y1 = self.node_coords[u]
+            x2, y2 = self.node_coords[v]
+
+            glow_color = "#A7F3D0" if self.active_edge_status == "UPDATED" else "#FDE68A"
+            core_color = self.COLOR_EDGE_CALC_UPDATE if self.active_edge_status == "UPDATED" else self.COLOR_EDGE_CALC_EXAMINE
+
+            # Outer glow
+            self.canvas.create_line(
+                x1, y1, x2, y2,
+                fill=glow_color,
+                width=8.0,
+                capstyle=tk.ROUND,
+                tags="active_exam_glow"
+            )
+            # Core line with arrow indicating relaxation direction
+            self.canvas.create_line(
+                x1, y1, x2, y2,
+                fill=core_color,
+                width=4.0,
+                arrow=tk.LAST,
+                arrowshape=(12, 14, 5),
+                capstyle=tk.ROUND,
+                tags="active_exam_edge"
+            )
 
     def _draw_edge_badges(self) -> None:
         """Draw weight labels inside clean rounded badges offset from edge lines."""
@@ -211,13 +283,11 @@ class NetworkCanvas(tk.Frame):
             if length == 0:
                 continue
 
-            # Normalized tangent and perpendicular normal vectors
             tx = dx / length
             ty = dy / length
             nx = -ty
             ny = tx
 
-            # Lookup specific offset config
             key = (min(u, v), max(u, v))
             if (u, v) in self.edge_label_offsets:
                 t_pos, norm_offset = self.edge_label_offsets[(u, v)]
@@ -227,65 +297,86 @@ class NetworkCanvas(tk.Frame):
             else:
                 t_pos, norm_offset = 0.5, 12.0
 
-            # Base point along edge
             bx = x1 + t_pos * dx
             by = y1 + t_pos * dy
 
-            # Offset point
             badge_x = bx + norm_offset * nx
             badge_y = by + norm_offset * ny
 
-            # Badge pill dimensions
             label_text = str(weight)
             pw, ph = 18, 14
 
-            # Draw white badge pill with subtle border
+            is_exam_edge = (self.active_edge is not None and key == (min(self.active_edge[0], self.active_edge[1]), max(self.active_edge[0], self.active_edge[1])))
+            bg_col = "#FEF3C7" if is_exam_edge else self.COLOR_BADGE_BG
+            border_col = "#F59E0B" if is_exam_edge else self.COLOR_BADGE_BORDER
+
             self.canvas.create_oval(
                 badge_x - pw / 2, badge_y - ph / 2,
                 badge_x + pw / 2, badge_y + ph / 2,
-                fill=self.COLOR_BADGE_BG,
-                outline=self.COLOR_BADGE_BORDER,
-                width=1.2,
+                fill=bg_col,
+                outline=border_col,
+                width=1.5 if is_exam_edge else 1.2,
                 tags="badge_bg"
             )
 
-            # Badge text
             self.canvas.create_text(
                 badge_x, badge_y,
                 text=label_text,
-                fill=self.COLOR_BADGE_TEXT,
+                fill="#92400E" if is_exam_edge else self.COLOR_BADGE_TEXT,
                 font=("Segoe UI", 9, "bold"),
                 tags="badge_text"
             )
 
     def _draw_nodes(self) -> None:
-        """Draw each node with distinct states for source, path, hover, and regular."""
+        """Draw nodes, active visiting rings, and live distance computation badges."""
         r = self.node_radius
 
         for node in self.graph.nodes:
             x, y = self.node_coords[node]
             is_source = (node == self.selected_source)
+            is_visiting = (node == self.active_visiting_node)
+            is_examining = (node == self.active_neighbor_node)
+            is_finalized = (node in self.permanent_nodes)
             is_path_dest = (len(self.highlighted_path) > 1 and node == self.highlighted_path[-1])
-            is_on_path = (node in self.highlighted_path and not is_source and not is_path_dest)
             is_hovered = (node == self.hovered_node)
 
-            # 1. Outer Glow Ring for source or path dest
-            if is_source:
+            # 1. Outer Auras & Rings
+            if is_visiting:
+                # Active Visiting Node: Vibrant Blue Glow Ring
+                self.canvas.create_oval(
+                    x - r - 8, y - r - 8,
+                    x + r + 8, y + r + 8,
+                    fill="",
+                    outline="#93C5FD",
+                    width=4.5,
+                    tags="node_ring"
+                )
+            elif is_examining:
+                # Currently Evaluated Neighbor: Amber Glow Ring
+                self.canvas.create_oval(
+                    x - r - 7, y - r - 7,
+                    x + r + 7, y + r + 7,
+                    fill="",
+                    outline=self.COLOR_NODE_EXAMINE_RING,
+                    width=4.0,
+                    tags="node_ring"
+                )
+            elif is_source:
                 self.canvas.create_oval(
                     x - r - 6, y - r - 6,
                     x + r + 6, y + r + 6,
                     fill="",
                     outline=self.COLOR_NODE_SOURCE_RING,
-                    width=4.0,
+                    width=3.5,
                     tags="node_ring"
                 )
-            elif is_path_dest:
+            elif is_finalized:
                 self.canvas.create_oval(
-                    x - r - 5, y - r - 5,
-                    x + r + 5, y + r + 5,
+                    x - r - 4, y - r - 4,
+                    x + r + 4, y + r + 4,
                     fill="",
-                    outline=self.COLOR_NODE_PATH_RING,
-                    width=4.0,
+                    outline="#BBF7D0",
+                    width=2.5,
                     tags="node_ring"
                 )
             elif is_hovered:
@@ -298,22 +389,27 @@ class NetworkCanvas(tk.Frame):
                     tags="node_ring"
                 )
 
-            # 2. Main Node Circle
-            if is_source:
+            # 2. Main Circle Body
+            if is_visiting:
+                fill_color = self.COLOR_NODE_SOURCE_BG
+                border_color = "#1E40AF"
+                text_color = "#FFFFFF"
+                border_width = 3.0
+            elif is_examining:
+                fill_color = self.COLOR_NODE_EXAMINE_BG
+                border_color = self.COLOR_NODE_EXAMINE_BORDER
+                text_color = self.COLOR_NODE_EXAMINE_TEXT
+                border_width = 2.8
+            elif is_source:
                 fill_color = self.COLOR_NODE_SOURCE_BG
                 border_color = self.COLOR_NODE_SOURCE_BORDER
                 text_color = self.COLOR_NODE_SOURCE_TEXT
                 border_width = 2.5
-            elif is_path_dest:
-                fill_color = self.COLOR_NODE_PATH_BG
-                border_color = self.COLOR_NODE_PATH_BORDER
-                text_color = self.COLOR_NODE_PATH_TEXT
-                border_width = 2.5
-            elif is_on_path:
-                fill_color = "#E0E7FF"
-                border_color = "#4338CA"
-                text_color = "#1E1B4B"
-                border_width = 2.0
+            elif is_finalized:
+                fill_color = "#ECFDF5"
+                border_color = self.COLOR_NODE_FINAL_BORDER
+                text_color = "#065F46"
+                border_width = 2.4
             else:
                 fill_color = "#F8FAFC" if is_hovered else self.COLOR_NODE_DEFAULT_BG
                 border_color = self.COLOR_NODE_DEFAULT_BORDER
@@ -329,7 +425,7 @@ class NetworkCanvas(tk.Frame):
                 tags=(f"node_{node}", "node_body")
             )
 
-            # 3. Node Letter Label
+            # 3. Node Letter
             self.canvas.create_text(
                 x, y,
                 text=node,
@@ -338,40 +434,102 @@ class NetworkCanvas(tk.Frame):
                 tags=(f"node_{node}", "node_text")
             )
 
+            # 4. Live Distance Calculation Tag (Above the Node)
+            self._draw_distance_pill(node, x, y - r - 15, is_finalized, is_visiting, is_examining)
+
+    def _draw_distance_pill(
+        self,
+        node: str,
+        cx: float,
+        cy: float,
+        is_finalized: bool,
+        is_visiting: bool,
+        is_examining: bool
+    ) -> None:
+        """Render a crisp rounded pill showing the live tentative or finalized distance."""
+        dist_val = self.current_distances.get(node, float("inf"))
+        dist_str = format_distance(dist_val)
+
+        if is_finalized:
+            tag_text = f"dist: {dist_str} ✓"
+            pill_bg = "#DCFCE7"
+            pill_border = "#86EFAC"
+            pill_fg = "#166534"
+        elif is_examining:
+            tag_text = f"cand: {dist_str}"
+            pill_bg = "#FEF3C7"
+            pill_border = "#F59E0B"
+            pill_fg = "#B45309"
+        elif is_visiting:
+            tag_text = f"visit: {dist_str}"
+            pill_bg = "#DBEAFE"
+            pill_border = "#3B82F6"
+            pill_fg = "#1E40AF"
+        elif math.isinf(dist_val):
+            tag_text = "dist: ∞"
+            pill_bg = "#F8FAFC"
+            pill_border = "#E2E8F0"
+            pill_fg = "#94A3B8"
+        else:
+            tag_text = f"dist: {dist_str} ⏳"
+            pill_bg = "#EFF6FF"
+            pill_border = "#BFDBFE"
+            pill_fg = "#1D4ED8"
+
+        pw = max(52, len(tag_text) * 7.5 + 14)
+        ph = 17
+
+        # Rounded rectangle for distance pill
+        self.canvas.create_rectangle(
+            cx - pw / 2, cy - ph / 2,
+            cx + pw / 2, cy + ph / 2,
+            fill=pill_bg,
+            outline=pill_border,
+            width=1.2,
+            tags="dist_pill_bg"
+        )
+
+        self.canvas.create_text(
+            cx, cy,
+            text=tag_text,
+            fill=pill_fg,
+            font=("Segoe UI", 8, "bold"),
+            tags="dist_pill_text"
+        )
+
     def _draw_legend(self) -> None:
-        """Render a compact, elegant legend explaining node & edge styling."""
-        w = max(self.canvas.winfo_width(), 400)
-        h = max(self.canvas.winfo_height(), 320)
+        """Render an explanatory legend for the interactive calculation features."""
+        w = max(self.canvas.winfo_width(), 420)
+        h = max(self.canvas.winfo_height(), 340)
 
         lx = 14
         ly = h - 34
 
-        # Background card for legend
         self.canvas.create_rectangle(
             lx - 4, ly - 8,
-            lx + 430, ly + 22,
+            lx + 560, ly + 22,
             fill="#F8FAFC",
             outline="#E2E8F0",
             width=1.0,
             tags="legend"
         )
 
-        # Legend item 1: Selected Source
-        self.canvas.create_oval(lx + 6, ly + 2, lx + 18, ly + 14, fill=self.COLOR_NODE_SOURCE_BG, outline=self.COLOR_NODE_SOURCE_BORDER, width=1.5)
-        self.canvas.create_text(lx + 24, ly + 8, text="Source Node", anchor="w", fill="#475569", font=("Segoe UI", 8, "bold"))
+        # 1. Source / Visiting
+        self.canvas.create_oval(lx + 4, ly + 2, lx + 16, ly + 14, fill=self.COLOR_NODE_SOURCE_BG, outline="#1D4ED8", width=1.5)
+        self.canvas.create_text(lx + 22, ly + 8, text="Source / Visiting", anchor="w", fill="#334155", font=("Segoe UI", 8, "bold"))
 
-        # Legend item 2: Destination / Path
-        self.canvas.create_oval(lx + 104, ly + 2, lx + 116, ly + 14, fill=self.COLOR_NODE_PATH_BG, outline=self.COLOR_NODE_PATH_BORDER, width=1.5)
-        self.canvas.create_text(lx + 122, ly + 8, text="Active Path Dest", anchor="w", fill="#475569", font=("Segoe UI", 8, "bold"))
+        # 2. Finalized Node
+        self.canvas.create_oval(lx + 128, ly + 2, lx + 140, ly + 14, fill="#ECFDF5", outline=self.COLOR_NODE_FINAL_BORDER, width=1.5)
+        self.canvas.create_text(lx + 146, ly + 8, text="Finalized (Permanent ✓)", anchor="w", fill="#334155", font=("Segoe UI", 8, "bold"))
 
-        # Legend item 3: Regular Node
-        self.canvas.create_oval(lx + 222, ly + 2, lx + 234, ly + 14, fill=self.COLOR_NODE_DEFAULT_BG, outline=self.COLOR_NODE_DEFAULT_BORDER, width=1.5)
-        self.canvas.create_text(lx + 240, ly + 8, text="Network Node", anchor="w", fill="#475569", font=("Segoe UI", 8, "bold"))
+        # 3. Examining Neighbor
+        self.canvas.create_oval(lx + 292, ly + 2, lx + 304, ly + 14, fill=self.COLOR_NODE_EXAMINE_BG, outline=self.COLOR_NODE_EXAMINE_BORDER, width=1.5)
+        self.canvas.create_text(lx + 310, ly + 8, text="Evaluating Neighbor", anchor="w", fill="#334155", font=("Segoe UI", 8, "bold"))
 
-        # Legend item 4: Edge weight
-        self.canvas.create_line(lx + 328, ly + 8, lx + 352, ly + 8, fill=self.COLOR_EDGE, width=2.0)
-        self.canvas.create_oval(lx + 335, ly + 2, lx + 345, ly + 14, fill="#FFFFFF", outline="#CBD5E1", width=1.0)
-        self.canvas.create_text(lx + 358, ly + 8, text="Edge (Weight)", anchor="w", fill="#475569", font=("Segoe UI", 8, "bold"))
+        # 4. Live Distance Tag
+        self.canvas.create_rectangle(lx + 436, ly + 2, lx + 476, ly + 14, fill="#EFF6FF", outline="#BFDBFE", width=1.0)
+        self.canvas.create_text(lx + 456, ly + 8, text="dist: ⏳", fill="#1D4ED8", font=("Segoe UI", 7, "bold"))
+        self.canvas.create_text(lx + 482, ly + 8, text="Live Distance Tag", anchor="w", fill="#334155", font=("Segoe UI", 8, "bold"))
 
     def _get_node_at(self, px: float, py: float) -> Optional[str]:
         """Check if pixel coordinates fall within any node circle."""

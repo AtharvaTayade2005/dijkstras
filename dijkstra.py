@@ -3,7 +3,7 @@ dijkstra.py
 -----------
 Core Dijkstra Shortest-Path Algorithm implementation with comprehensive,
 deterministic event tracing, Temporary/Permanent list state tracking,
-and path reconstruction for network routing.
+granular visual simulation frames, and path reconstruction for network routing.
 
 Independent from UI widgets to facilitate automated headless testing.
 """
@@ -12,6 +12,13 @@ import math
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Optional
 from graph import NetworkGraph
+
+
+def format_distance(val: float) -> str:
+    """Helper to format distance numbers cleanly."""
+    if math.isinf(val):
+        return "∞"
+    return str(int(val) if isinstance(val, (int, float)) and float(val).is_integer() else val)
 
 
 @dataclass
@@ -29,7 +36,7 @@ class NeighborEvaluation:
     already_finalized: bool = False
 
     def format_distance(self, val: float) -> str:
-        return "∞" if math.isinf(val) else str(int(val) if val.is_integer() else val)
+        return format_distance(val)
 
     def detailed_text(self) -> str:
         curr_str = self.format_distance(self.current_known_distance)
@@ -67,7 +74,7 @@ class DijkstraStep:
 
     @staticmethod
     def format_dist(val: float) -> str:
-        return "∞" if math.isinf(val) else str(int(val) if isinstance(val, (int, float)) and float(val).is_integer() else val)
+        return format_distance(val)
 
     def temp_list_str(self) -> str:
         if not self.temporary_list:
@@ -83,6 +90,34 @@ class DijkstraStep:
 
 
 @dataclass
+class SimulationFrame:
+    """
+    Granular atomic visual step for interactive step-by-step playback.
+    Captures live distances, active node, examined edge, formulas, and decisions.
+    """
+    frame_index: int
+    step_number: int
+    phase: str  # "INIT", "PICK_MIN", "EXAMINE_EDGE", "STEP_DONE", "COMPLETE"
+    title: str
+    current_node: str
+    selected_cost: float
+    examining_neighbor: Optional[str] = None
+    edge_weight: Optional[int] = None
+    candidate_dist: Optional[float] = None
+    prev_dist: Optional[float] = None
+    status: str = "INFO"  # "UPDATED", "UNCHANGED", "SKIPPED", "PICKED", "INIT", "FINALIZED", "COMPLETE"
+    explanation_text: str = ""
+    math_formula: str = ""
+    comparison_text: str = ""
+    distances_snapshot: Dict[str, float] = field(default_factory=dict)
+    predecessors_snapshot: Dict[str, Optional[str]] = field(default_factory=dict)
+    permanent_nodes: List[str] = field(default_factory=list)
+    temporary_nodes: List[Tuple[str, float]] = field(default_factory=list)
+    active_edge: Optional[Tuple[str, str]] = None
+    highlight_path: List[str] = field(default_factory=list)
+
+
+@dataclass
 class RoutingEntry:
     """Row in the final routing table for a destination."""
     destination: str
@@ -93,7 +128,7 @@ class RoutingEntry:
 
     @property
     def distance_display(self) -> str:
-        return "∞" if math.isinf(self.distance) else str(int(self.distance) if self.distance.is_integer() else self.distance)
+        return format_distance(self.distance)
 
 
 @dataclass
@@ -106,6 +141,27 @@ class DijkstraResult:
     steps: List[DijkstraStep]
     initial_temp_list: List[Tuple[str, float]]
     final_perm_list: List[Tuple[str, float]]
+    frames: List[SimulationFrame] = field(default_factory=list)
+
+
+def reconstruct_path_at(source: str, target: str, preds: Dict[str, Optional[str]]) -> List[str]:
+    """Helper to reconstruct the current known shortest path to target."""
+    if target == source:
+        return [source]
+    curr: Optional[str] = target
+    path_rev: List[str] = []
+    visited_set = set()
+    while curr is not None and curr not in visited_set:
+        visited_set.add(curr)
+        path_rev.append(curr)
+        if curr == source:
+            break
+        curr = preds.get(curr, None)
+
+    rev = list(reversed(path_rev))
+    if len(rev) >= 1 and rev[0] == source:
+        return rev
+    return []
 
 
 def run_dijkstra(graph: NetworkGraph, source: str) -> DijkstraResult:
@@ -113,7 +169,8 @@ def run_dijkstra(graph: NetworkGraph, source: str) -> DijkstraResult:
     Executes Dijkstra's algorithm from `source` on `graph`.
     
     Generates a full trace of steps with Temporary and Permanent lists,
-    tie-breaking, neighbor evaluations, and complete routing table.
+    tie-breaking, neighbor evaluations, granular simulation frames,
+    and complete routing table.
     """
     if source not in graph.nodes:
         raise ValueError(f"Source node '{source}' not in graph.")
@@ -132,9 +189,33 @@ def run_dijkstra(graph: NetworkGraph, source: str) -> DijkstraResult:
     permanent_order: List[str] = []
 
     steps: List[DijkstraStep] = []
+    frames: List[SimulationFrame] = []
 
     # Initial state record before step 1
     initial_temp = [(n, distances[n]) for n in sorted(all_nodes, key=lambda x: (distances[x], x))]
+
+    # Frame 0: Initialization
+    frames.append(SimulationFrame(
+        frame_index=0,
+        step_number=0,
+        phase="INIT",
+        title=f"Initialization: Source Node '{source}'",
+        current_node=source,
+        selected_cost=0.0,
+        status="INIT",
+        explanation_text=(
+            f"Algorithm initialized at source Node '{source}'. "
+            f"Source distance set to 0. All other node distances set to ∞. All predecessors set to None."
+        ),
+        math_formula=f"dist[{source}] = 0  |  dist[v] = ∞ for all other nodes v",
+        comparison_text="Ready to begin. The algorithm will now find the unfinalized node with the lowest tentative distance.",
+        distances_snapshot=distances.copy(),
+        predecessors_snapshot=predecessors.copy(),
+        permanent_nodes=[],
+        temporary_nodes=initial_temp.copy(),
+        active_edge=None,
+        highlight_path=[source],
+    ))
 
     step_counter = 1
 
@@ -147,7 +228,6 @@ def run_dijkstra(graph: NetworkGraph, source: str) -> DijkstraResult:
 
         # If all remaining unfinalized nodes have infinity distance, they are unreachable
         if math.isinf(selected_dist):
-            # Finalize remaining as unreachable
             for unreachable_node in candidates:
                 permanent_order.append(unreachable_node)
                 unfinalized.remove(unreachable_node)
@@ -166,8 +246,7 @@ def run_dijkstra(graph: NetworkGraph, source: str) -> DijkstraResult:
         else:
             selection_reason = (
                 f"Selected node '{selected_node}' because it has the minimum tentative distance "
-                f"({int(selected_dist) if selected_dist.is_integer() else selected_dist}) "
-                f"among all remaining unfinalized nodes."
+                f"({format_distance(selected_dist)}) among all remaining unfinalized nodes."
             )
 
         step = DijkstraStep(
@@ -176,6 +255,29 @@ def run_dijkstra(graph: NetworkGraph, source: str) -> DijkstraResult:
             selected_distance=selected_dist,
             selection_reason=selection_reason,
         )
+
+        # Frame: Pick Min Node
+        frames.append(SimulationFrame(
+            frame_index=len(frames),
+            step_number=step_counter,
+            phase="PICK_MIN",
+            title=f"Step {step_counter}: Select Node '{selected_node}' (Cost = {format_distance(selected_dist)})",
+            current_node=selected_node,
+            selected_cost=selected_dist,
+            status="PICKED",
+            explanation_text=(
+                f"Node '{selected_node}' has the smallest tentative distance ({format_distance(selected_dist)}) "
+                f"among unfinalized nodes. It is moved to the Permanent List."
+            ),
+            math_formula=f"u* = argmin {{ dist[v] : v ∉ Permanent }} = '{selected_node}' (cost = {format_distance(selected_dist)})",
+            comparison_text=f"Node '{selected_node}' is now locked. Examining all its outgoing edges...",
+            distances_snapshot=distances.copy(),
+            predecessors_snapshot=predecessors.copy(),
+            permanent_nodes=permanent_order.copy(),
+            temporary_nodes=[(n, distances[n]) for n in sorted(list(unfinalized), key=lambda x: (distances[x], x))],
+            active_edge=None,
+            highlight_path=reconstruct_path_at(source, selected_node, predecessors),
+        ))
 
         # 8. Examine adjacent neighbors in deterministic alphabetical order
         neighbors = graph.get_neighbors(selected_node)
@@ -193,35 +295,93 @@ def run_dijkstra(graph: NetworkGraph, source: str) -> DijkstraResult:
                     candidate_distance=cand_dist,
                     is_updated=False,
                     status_summary="Already Finalized",
-                    reason=f"Node {neighbor} is already in the Permanent List with finalized distance {int(curr_dist) if curr_dist.is_integer() else curr_dist}.",
+                    reason=f"Node {neighbor} is already in the Permanent List with finalized distance {format_distance(curr_dist)}.",
                     predecessor_before=predecessors[neighbor],
                     predecessor_after=predecessors[neighbor],
                     already_finalized=True,
                 )
                 step.neighbor_evaluations.append(eval_record)
+
+                # Frame: Skipped neighbor
+                frames.append(SimulationFrame(
+                    frame_index=len(frames),
+                    step_number=step_counter,
+                    phase="EXAMINE_EDGE",
+                    title=f"Step {step_counter}: Edge {selected_node} — {neighbor} (wt {edge_w})",
+                    current_node=selected_node,
+                    selected_cost=selected_dist,
+                    examining_neighbor=neighbor,
+                    edge_weight=edge_w,
+                    candidate_dist=cand_dist,
+                    prev_dist=curr_dist,
+                    status="SKIPPED",
+                    explanation_text=(
+                        f"Neighbor Node '{neighbor}' is already in the Permanent List with finalized distance {format_distance(curr_dist)}. "
+                        f"Skipping edge {selected_node} — {neighbor}."
+                    ),
+                    math_formula=f"'{neighbor}' ∈ Permanent List  ➔  Optimal shortest path already finalized",
+                    comparison_text="No update performed because finalized nodes cannot have their distances improved.",
+                    distances_snapshot=distances.copy(),
+                    predecessors_snapshot=predecessors.copy(),
+                    permanent_nodes=permanent_order.copy(),
+                    temporary_nodes=[(n, distances[n]) for n in sorted(list(unfinalized), key=lambda x: (distances[x], x))],
+                    active_edge=(selected_node, neighbor),
+                    highlight_path=reconstruct_path_at(source, neighbor, predecessors),
+                ))
                 continue
 
             # 10 & 11. Compare candidate distance with neighbor's tentative distance
             if cand_dist < curr_dist:
                 old_pred = predecessors[neighbor]
+                old_dist = curr_dist
                 distances[neighbor] = cand_dist
                 predecessors[neighbor] = selected_node
                 
                 eval_record = NeighborEvaluation(
                     neighbor=neighbor,
                     edge_weight=edge_w,
-                    current_known_distance=curr_dist,
+                    current_known_distance=old_dist,
                     candidate_distance=cand_dist,
                     is_updated=True,
                     status_summary="Updated",
                     reason=(
-                        f"Candidate distance ({cand_dist}) < previous distance ({'∞' if math.isinf(curr_dist) else curr_dist}). "
+                        f"Candidate distance ({cand_dist}) < previous distance ({format_distance(old_dist)}). "
                         f"Updated distance to {cand_dist} and set predecessor to '{selected_node}'."
                     ),
                     predecessor_before=old_pred,
                     predecessor_after=selected_node,
                     already_finalized=False,
                 )
+
+                # Frame: Updated neighbor
+                frames.append(SimulationFrame(
+                    frame_index=len(frames),
+                    step_number=step_counter,
+                    phase="EXAMINE_EDGE",
+                    title=f"Step {step_counter}: Relax Edge {selected_node} — {neighbor} (wt {edge_w})",
+                    current_node=selected_node,
+                    selected_cost=selected_dist,
+                    examining_neighbor=neighbor,
+                    edge_weight=edge_w,
+                    candidate_dist=cand_dist,
+                    prev_dist=old_dist,
+                    status="UPDATED",
+                    explanation_text=(
+                        f"Shorter route discovered to Node '{neighbor}' via '{selected_node}'! "
+                        f"Candidate distance ({cand_dist}) < Previous tentative distance ({format_distance(old_dist)})."
+                    ),
+                    math_formula=f"Candidate = dist[{selected_node}] ({format_distance(selected_dist)}) + weight({selected_node}, {neighbor}) ({edge_w}) = {cand_dist}",
+                    comparison_text=(
+                        f"Decision: {cand_dist} < {format_distance(old_dist)}  ➔  "
+                        f"UPDATED! dist[{neighbor}] becomes {cand_dist}, pred[{neighbor}] = '{selected_node}' (was {old_pred or 'None'})."
+                    ),
+                    distances_snapshot=distances.copy(),
+                    predecessors_snapshot=predecessors.copy(),
+                    permanent_nodes=permanent_order.copy(),
+                    temporary_nodes=[(n, distances[n]) for n in sorted(list(unfinalized), key=lambda x: (distances[x], x))],
+                    active_edge=(selected_node, neighbor),
+                    highlight_path=reconstruct_path_at(source, neighbor, predecessors),
+                ))
             else:
                 eval_record = NeighborEvaluation(
                     neighbor=neighbor,
@@ -231,13 +391,43 @@ def run_dijkstra(graph: NetworkGraph, source: str) -> DijkstraResult:
                     is_updated=False,
                     status_summary="Unchanged",
                     reason=(
-                        f"Candidate distance ({cand_dist}) ≥ current distance ({curr_dist}). "
-                        f"Tentative distance kept at {curr_dist}."
+                        f"Candidate distance ({cand_dist}) ≥ current distance ({format_distance(curr_dist)}). "
+                        f"Tentative distance kept at {format_distance(curr_dist)}."
                     ),
                     predecessor_before=predecessors[neighbor],
                     predecessor_after=predecessors[neighbor],
                     already_finalized=False,
                 )
+
+                # Frame: Unchanged neighbor
+                frames.append(SimulationFrame(
+                    frame_index=len(frames),
+                    step_number=step_counter,
+                    phase="EXAMINE_EDGE",
+                    title=f"Step {step_counter}: Inspect Edge {selected_node} — {neighbor} (wt {edge_w})",
+                    current_node=selected_node,
+                    selected_cost=selected_dist,
+                    examining_neighbor=neighbor,
+                    edge_weight=edge_w,
+                    candidate_dist=cand_dist,
+                    prev_dist=curr_dist,
+                    status="UNCHANGED",
+                    explanation_text=(
+                        f"Alternative route to Node '{neighbor}' via '{selected_node}' costs {cand_dist}, "
+                        f"which is not better than the current known distance of {format_distance(curr_dist)}."
+                    ),
+                    math_formula=f"Candidate = dist[{selected_node}] ({format_distance(selected_dist)}) + weight({selected_node}, {neighbor}) ({edge_w}) = {cand_dist}",
+                    comparison_text=(
+                        f"Decision: {cand_dist} ≥ {format_distance(curr_dist)}  ➔  "
+                        f"UNCHANGED. Kept current distance {format_distance(curr_dist)} and predecessor '{predecessors[neighbor] or 'None'}'."
+                    ),
+                    distances_snapshot=distances.copy(),
+                    predecessors_snapshot=predecessors.copy(),
+                    permanent_nodes=permanent_order.copy(),
+                    temporary_nodes=[(n, distances[n]) for n in sorted(list(unfinalized), key=lambda x: (distances[x], x))],
+                    active_edge=(selected_node, neighbor),
+                    highlight_path=reconstruct_path_at(source, neighbor, predecessors),
+                ))
 
             step.neighbor_evaluations.append(eval_record)
 
@@ -252,8 +442,56 @@ def run_dijkstra(graph: NetworkGraph, source: str) -> DijkstraResult:
             (n, distances[n]) for n in permanent_order
         ]
 
+        # Frame: Step Completed
+        frames.append(SimulationFrame(
+            frame_index=len(frames),
+            step_number=step_counter,
+            phase="STEP_DONE",
+            title=f"Step {step_counter} Complete: Node '{selected_node}' Fully Finalized",
+            current_node=selected_node,
+            selected_cost=selected_dist,
+            status="FINALIZED",
+            explanation_text=(
+                f"All adjacent edges of Node '{selected_node}' have been examined. "
+                f"Its distance {format_distance(selected_dist)} is permanently finalized."
+            ),
+            math_formula=f"dist[{selected_node}] = {format_distance(selected_dist)} (Permanently Finalized)",
+            comparison_text=(
+                f"Permanent: {step.perm_list_str()}  |  Temporary: {step.temp_list_str()}"
+            ),
+            distances_snapshot=distances.copy(),
+            predecessors_snapshot=predecessors.copy(),
+            permanent_nodes=permanent_order.copy(),
+            temporary_nodes=step.temporary_list.copy(),
+            active_edge=None,
+            highlight_path=reconstruct_path_at(source, selected_node, predecessors),
+        ))
+
         steps.append(step)
         step_counter += 1
+
+    # Final Frame: All Complete
+    frames.append(SimulationFrame(
+        frame_index=len(frames),
+        step_number=step_counter - 1,
+        phase="COMPLETE",
+        title="Algorithm Complete: All Shortest Paths Found",
+        current_node=source,
+        selected_cost=0.0,
+        status="COMPLETE",
+        explanation_text=(
+            f"All reachable nodes from source Node '{source}' have been finalized. "
+            f"The shortest path and minimum cost to every node in the network are established."
+        ),
+        math_formula="Optimal Shortest Path Tree (SPT) is complete for all destinations.",
+        comparison_text="All destinations locked. See final live routing table.",
+        distances_snapshot=distances.copy(),
+        predecessors_snapshot=predecessors.copy(),
+        permanent_nodes=permanent_order.copy(),
+        temporary_nodes=[],
+        active_edge=None,
+        highlight_path=[],
+    ))
 
     # 14. Build final routing table & path reconstruction
     routing_table: Dict[str, RoutingEntry] = {}
@@ -276,16 +514,7 @@ def run_dijkstra(graph: NetworkGraph, source: str) -> DijkstraResult:
                 path_str=source,
             )
         else:
-            # Reconstruct path backwards from dest to source
-            path_rev: List[str] = []
-            curr: Optional[str] = dest
-            while curr is not None:
-                path_rev.append(curr)
-                if curr == source:
-                    break
-                curr = predecessors[curr]
-
-            path = list(reversed(path_rev))
+            path = reconstruct_path_at(source, dest, predecessors)
             if len(path) >= 2 and path[0] == source:
                 next_hop = path[1]
                 path_str = " → ".join(path)
@@ -311,4 +540,5 @@ def run_dijkstra(graph: NetworkGraph, source: str) -> DijkstraResult:
         steps=steps,
         initial_temp_list=initial_temp,
         final_perm_list=final_perm,
+        frames=frames,
     )

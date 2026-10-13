@@ -29,12 +29,23 @@ python main.py
    - Fully responsive canvas that recalculates coordinates without distortion during window resize.
    - Compact visual legend explaining styling semantics.
 
-2. **Live Routing Table**:
+2. **Live Step-by-Step Distance Calculation & Working Panel**:
+   - **Stepper Controls**: `⏮ Start`, `◀ Prev Step`, `▶ Auto Play / ⏸ Pause`, `Next Step ▶`, `⏭ End`.
+   - **Progress Scrubber**: Interactive slider to scrub backward and forward through any moment in the algorithm.
+   - **Speed Control**: Normal (1.1s), Slow (2.0s), Fast (0.5s) auto-play animations.
+   - **Mathematical Working**: Displays candidate distance formula:
+     $$\text{dist}[u] + \text{weight}(u, v) = \text{candidate}$$
+   - **Decision Reasoning**: Explicitly compares candidate vs current tentative distance and explains whether the node distance was `UPDATED`, `UNCHANGED`, or `SKIPPED`.
+   - **Real-time Canvas Distance Tags**: Every node on the network canvas displays a live distance pill tag (`[dist: 0 ✓]`, `[dist: 2 ⏳]`, `[dist: ∞]`, or `[visit: 2]`).
+   - **Directional Edge Relaxation Arrows**: Evaluated edges glow in amber/green with animated directional arrows pointing from current node to neighbor.
+
+3. **Live Routing Table**:
    - Destination Node
    - Shortest Distance from selected source (source is `0`; `∞` for unreachable)
    - Next Hop (represented as `-` for source; correct forwarding hop for destinations)
    - Complete Shortest Path (e.g. `A → C → D`)
    - Alternating row styling and clear highlight for the source row.
+   - **Live Frame Synchronization**: Table rows display live status (`Final ✓`, `Tentative ⏳`, `Testing ⚡`, `Visiting ★`) matching the exact calculation frame!
    - **Interactive Path Inspection**: Clicking any row in the routing table illuminates the complete shortest path on the canvas in glowing blue/emerald.
 
 3. **Dedicated Step-by-Step Explanation Window**:
